@@ -155,31 +155,42 @@ export const ForumBackendService = {
 
   // --- Post Operations ---
   async getPosts(category?: string, search?: string): Promise<Post[]> {
+    let localPosts = getStorageItem<Post[]>("forum_posts", INITIAL_POSTS);
+
     if (supabaseClient) {
       try {
         let query = supabaseClient.from("posts").select("*");
         if (category) query = query.eq("category", category);
         if (search) query = query.or(`title.ilike.%${search}%,content.ilike.%${search}%`);
         const { data, error } = await query.order("created_at", { ascending: false });
-        if (!error && data && data.length > 0) return data;
+        if (!error && data) {
+          // Merge Supabase posts with local storage posts to make sure no post is ever lost!
+          const merged = [...data];
+          localPosts.forEach(lp => {
+            if (!merged.some(mp => mp.id === lp.id)) {
+              merged.push(lp);
+            }
+          });
+          // Sort by date
+          return merged.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        }
       } catch (err) {
         console.warn("Supabase query failed, falling back to LocalStorage posts.", err);
       }
     }
 
-    // LocalStorage failover
-    let posts = getStorageItem<Post[]>("forum_posts", INITIAL_POSTS);
+    // LocalStorage fallback filtering
     if (category) {
-      posts = posts.filter(p => p.category === category);
+      localPosts = localPosts.filter(p => p.category === category);
     }
     if (search) {
       const lowerSearch = search.toLowerCase();
-      posts = posts.filter(p => 
+      localPosts = localPosts.filter(p => 
         p.title.toLowerCase().includes(lowerSearch) || 
         p.content.toLowerCase().includes(lowerSearch)
       );
     }
-    return posts;
+    return localPosts;
   },
 
   async getPostById(id: string): Promise<Post | null> {
@@ -212,17 +223,79 @@ export const ForumBackendService = {
       isVerified: false
     };
 
+    // ALWAYS write to LocalStorage as a highly durable primary backup
+    const posts = getStorageItem<Post[]>("forum_posts", INITIAL_POSTS);
+    posts.unshift(newPost);
+    setStorageItem("forum_posts", posts);
+
     if (supabaseClient) {
       try {
         const { data, error } = await supabaseClient.from("posts").insert([newPost]).select().single();
         if (!error && data) return data;
-      } catch {}
+      } catch (err) {
+        console.warn("Supabase insert failed, relying on LocalStorage primary backup.", err);
+      }
     }
 
-    const posts = getStorageItem<Post[]>("forum_posts", INITIAL_POSTS);
-    posts.unshift(newPost);
-    setStorageItem("forum_posts", posts);
     return newPost;
+  },
+
+  async updatePost(postId: string, title: string, content: string, userAddress: string): Promise<Post | null> {
+    // Save to local storage first
+    const posts = getStorageItem<Post[]>("forum_posts", INITIAL_POSTS);
+    const postIndex = posts.findIndex(p => p.id === postId && p.authorAddress.toLowerCase() === userAddress.toLowerCase());
+    if (postIndex === -1) return null;
+
+    posts[postIndex].title = title;
+    posts[postIndex].content = content;
+    setStorageItem("forum_posts", posts);
+
+    // Sync back to Supabase
+    if (supabaseClient) {
+      try {
+        const { data, error } = await supabaseClient
+          .from("posts")
+          .update({ title, content })
+          .eq("id", postId)
+          .eq("authorAddress", userAddress)
+          .select()
+          .single();
+        if (!error && data) return data;
+      } catch (err) {
+        console.warn("Supabase update failed, local storage remains updated.", err);
+      }
+    }
+
+    return posts[postIndex];
+  },
+
+  async deletePost(postId: string, userAddress: string): Promise<boolean> {
+    // Delete from LocalStorage
+    const posts = getStorageItem<Post[]>("forum_posts", INITIAL_POSTS);
+    const newPosts = posts.filter(p => !(p.id === postId && p.authorAddress.toLowerCase() === userAddress.toLowerCase()));
+    
+    if (posts.length === newPosts.length) return false;
+    setStorageItem("forum_posts", newPosts);
+
+    // Also remove comments associated with deleted post from local storage
+    const comments = getStorageItem<Comment[]>("forum_comments", INITIAL_COMMENTS);
+    const filteredComments = comments.filter(c => c.postId !== postId);
+    setStorageItem("forum_comments", filteredComments);
+
+    // Delete from Supabase
+    if (supabaseClient) {
+      try {
+        await supabaseClient
+          .from("posts")
+          .delete()
+          .eq("id", postId)
+          .eq("authorAddress", userAddress);
+      } catch (err) {
+        console.warn("Supabase deletion failed, local storage remains updated.", err);
+      }
+    }
+
+    return true;
   },
 
   async votePost(postId: string, voteType: "up" | "down", userAddress: string): Promise<Post | null> {
@@ -233,13 +306,13 @@ export const ForumBackendService = {
     const post = posts[postIndex];
     if (post.voted === voteType) {
       // Undo vote
-      if (voteType === "up") post.upvotes--;
-      else post.downvotes--;
+      if (voteType === "up") post.upvotes = Math.max(0, post.upvotes - 1);
+      else post.downvotes = Math.max(0, post.downvotes - 1);
       post.voted = null;
     } else {
       // Change or add vote
-      if (post.voted === "up") post.upvotes--;
-      if (post.voted === "down") post.downvotes--;
+      if (post.voted === "up") post.upvotes = Math.max(0, post.upvotes - 1);
+      if (post.voted === "down") post.downvotes = Math.max(0, post.downvotes - 1);
 
       if (voteType === "up") post.upvotes++;
       else post.downvotes++;
@@ -248,6 +321,21 @@ export const ForumBackendService = {
 
     posts[postIndex] = post;
     setStorageItem("forum_posts", posts);
+
+    if (supabaseClient) {
+      try {
+        await supabaseClient
+          .from("posts")
+          .update({ 
+            upvotes: post.upvotes, 
+            downvotes: post.downvotes 
+          })
+          .eq("id", postId);
+      } catch (err) {
+        console.warn("Supabase vote update failed, local storage remains updated.", err);
+      }
+    }
+
     return post;
   },
 
@@ -277,16 +365,7 @@ export const ForumBackendService = {
       onChainReputation: 0
     };
 
-    if (supabaseClient) {
-      try {
-        const { data, error } = await supabaseClient.from("comments").insert([newComment]).select().single();
-        // update comment count on post
-        await supabaseClient.rpc("increment_comment_count", { post_id: postId });
-        if (!error && data) return data;
-      } catch {}
-    }
-
-    // LocalStorage persistence
+    // Save to LocalStorage immediately
     const comments = getStorageItem<Comment[]>("forum_comments", INITIAL_COMMENTS);
     comments.push(newComment);
     setStorageItem("forum_comments", comments);
@@ -297,6 +376,16 @@ export const ForumBackendService = {
     if (postIndex !== -1) {
       posts[postIndex].commentsCount++;
       setStorageItem("forum_posts", posts);
+    }
+
+    if (supabaseClient) {
+      try {
+        await supabaseClient.from("comments").insert([newComment]);
+        // update comment count on post
+        await supabaseClient.rpc("increment_comment_count", { post_id: postId });
+      } catch (err) {
+        console.warn("Supabase comment insert failed, relying on LocalStorage fallback.", err);
+      }
     }
 
     return newComment;
