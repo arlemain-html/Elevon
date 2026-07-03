@@ -5,6 +5,11 @@
 
 import React, { useState, useEffect } from "react";
 import { Web3Provider } from "./providers/Web3Provider";
+import { WagmiProvider } from "wagmi";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { wagmiConfig } from "./blockchain/wagmiConfig";
+
+const queryClient = new QueryClient();
 import { ForumBackendService } from "./services/supabase";
 import { Header } from "./components/Header";
 import { Navigation } from "./components/Navigation";
@@ -136,8 +141,12 @@ function MainAppContent() {
 
 export default function App() {
   return (
-    <Web3Provider>
-      <MainAppContent />
-    </Web3Provider>
+    <WagmiProvider config={wagmiConfig}>
+      <QueryClientProvider client={queryClient}>
+        <Web3Provider>
+          <MainAppContent />
+        </Web3Provider>
+      </QueryClientProvider>
+    </WagmiProvider>
   );
 }
