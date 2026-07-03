@@ -19,12 +19,15 @@ interface PostCardProps {
   post: Post;
   onPostClick: (postId: string) => void;
   onVote: (postId: string, voteType: "up" | "down") => void;
+  onDelete?: (postId: string) => void;
 }
 
-export const PostCard: React.FC<PostCardProps> = ({ post, onPostClick, onVote }) => {
+export const PostCard: React.FC<PostCardProps> = ({ post, onPostClick, onVote, onDelete }) => {
   const { account } = useWeb3();
   const [isBookmarked, setIsBookmarked] = useState(false);
   const [copiedShare, setCopiedShare] = useState(false);
+
+  const isOwner = account && account.toLowerCase() === post.authorAddress.toLowerCase();
 
   useEffect(() => {
     if (account) {
@@ -210,6 +213,19 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onPostClick, onVote })
           </div>
 
           <div className="flex items-center gap-3">
+            {isOwner && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete?.(post.id);
+                }}
+                className="p-1 rounded text-slate-500 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                title="Delete Post"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            )}
+
             {account && (
               <button 
                 onClick={handleBookmarkToggle}
