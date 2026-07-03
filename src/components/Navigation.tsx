@@ -47,7 +47,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   };
 
   return (
-    <aside id="sidebar_nav" className="w-64 bg-[#09090b] border-r border-slate-800 flex flex-col justify-between h-[calc(100vh-4rem)] sticky top-16 p-6 overflow-y-auto">
+    <aside id="sidebar_nav" className="hidden md:flex w-64 bg-[#09090b] border-r border-slate-800 flex flex-col justify-between h-[calc(100vh-4rem)] sticky top-16 p-6 overflow-y-auto">
       <div className="space-y-8">
         {/* Main Links */}
         <div>
