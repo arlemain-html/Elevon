@@ -417,7 +417,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
                         className="w-5 h-5 rounded bg-slate-900"
                       />
                       <span className="font-bold text-slate-300">
-                        {comment.authorUsername || formatAddress(comment.authorAddress || comment.author)}
+                        {comment.authorUsername || formatAddress(comment.authorAddress)}
                       </span>
                     </div>
                     <span className="text-slate-500 font-medium">
