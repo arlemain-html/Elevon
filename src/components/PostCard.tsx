@@ -136,11 +136,11 @@ export const PostCard: React.FC<PostCardProps> = ({ post, onPostClick, onVote, o
           <div className="flex items-center gap-1.5">
             <div className="relative">
               <img 
-                src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${post.signer || post.id}`} 
+                src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${post.authorAddress || post.id}`} 
                 alt="author avatar" 
                 className="w-5 h-5 rounded bg-slate-900"
               />
-              {post.verified && (
+              {post.isVerified && (
                 <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full border border-slate-950 absolute -bottom-0.5 -right-0.5 flex items-center justify-center">
                   <Check className="w-1.5 h-1.5 text-white" />
                 </span>
