@@ -8,6 +8,25 @@ import {
 } from "../blockchain/abis";
 import { UserStats, BadgeType } from "../types/forum";
 import { ForumBackendService } from "../services/supabase";
+import { Check, AlertCircle, Sparkles } from "lucide-react";
+
+// Local storage helpers
+const getStorageItem = <T,>(key: string, fallback: T): T => {
+  try {
+    const val = localStorage.getItem(key);
+    return val ? JSON.parse(val) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const setStorageItem = <T,>(key: string, value: T): void => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+};
+
+export type TxState = "idle" | "waiting_confirmation" | "pending" | "confirmed" | "failed";
 
 interface Web3ContextType {
   provider: ethers.BrowserProvider | null;
@@ -23,12 +42,17 @@ interface Web3ContextType {
   currentTxHash: string | null;
   txError: string | null;
   txSuccessMessage: string | null;
+  isSandboxMode: boolean;
+  txState: TxState;
   
   // Actions
   connectWallet: () => Promise<void>;
+  connectSandboxWallet: () => void;
   disconnectWallet: () => void;
   switchNetwork: () => Promise<boolean>;
   refreshStats: (targetAddress?: string) => Promise<void>;
+  addXPAndReputation: (xpDelta: number, repDelta: number) => void;
+  clearTxState: () => void;
   
   // Contract Transactions
   registerIdentityOnChain: (username: string) => Promise<string | null>;
@@ -53,6 +77,10 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [currentTxHash, setCurrentTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
   const [txSuccessMessage, setTxSuccessMessage] = useState<string | null>(null);
+  const [isSandboxMode, setIsSandboxMode] = useState<boolean>(() => {
+    return localStorage.getItem("web3_sandbox_active") === "true";
+  });
+  const [txState, setTxState] = useState<TxState>("idle");
   
   const [userStats, setUserStats] = useState<UserStats | null>(null);
   const [badges, setBadges] = useState<BadgeType[]>([]);
@@ -60,8 +88,28 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
   // 1. Read-only provider connected to Base RPC directly
   const readOnlyProvider = new ethers.JsonRpcProvider(CHAIN_CONFIG.rpcUrl);
 
+  const getSandboxAddress = (): string => {
+    let addr = localStorage.getItem("sandbox_wallet_address");
+    if (!addr) {
+      const chars = "0123456789abcdef";
+      let hex = "0x";
+      for (let i = 0; i < 40; i++) {
+        hex += chars[Math.floor(Math.random() * 16)];
+      }
+      addr = hex;
+      localStorage.setItem("sandbox_wallet_address", addr);
+    }
+    return addr;
+  };
+
   // Initialize and check for existing connection
   useEffect(() => {
+    const activeSandbox = localStorage.getItem("web3_sandbox_active") === "true";
+    if (activeSandbox) {
+      connectSandboxWallet();
+      return;
+    }
+
     const ethereum = (window as any).ethereum;
     const checkConnection = async () => {
       if (ethereum) {
@@ -122,23 +170,26 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   // Sync / refresh user stats and badges
   useEffect(() => {
-    if (account && isCorrectNetwork) {
+    if (account) {
       refreshStats(account);
     } else {
       // Load default global demo stats in read-only mode for deployer if wallet disconnected
       refreshStats(CONTRACT_ADDRESSES.ForumIdentityRegistry);
     }
-  }, [account, isCorrectNetwork]);
+  }, [account, isCorrectNetwork, isSandboxMode]);
 
   const connectWallet = async () => {
     const ethereum = (window as any).ethereum;
     if (!ethereum) {
-      setTxError("Browser wallet not detected. Please install MetaMask or Coinbase Wallet.");
+      setTxError("Browser wallet not detected. Connecting Sandbox Mode as a high-fidelity fallback!");
+      connectSandboxWallet();
       return;
     }
 
     setIsConnecting(true);
     setTxError(null);
+    setIsSandboxMode(false);
+    localStorage.setItem("web3_sandbox_active", "false");
     try {
       const browserProvider = new ethers.BrowserProvider(ethereum);
       setProvider(browserProvider);
@@ -167,6 +218,36 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
+  const connectSandboxWallet = () => {
+    setIsSandboxMode(true);
+    localStorage.setItem("web3_sandbox_active", "true");
+    
+    const sandboxAddr = getSandboxAddress();
+    setAccount(sandboxAddr);
+    setIsCorrectNetwork(true);
+    setChainId(CHAIN_CONFIG.chainId);
+    
+    // Load local stats immediately
+    const local = getStorageItem<UserStats>(`user_stats_${sandboxAddr.toLowerCase()}`, {
+      xp: 150,
+      reputation: 15,
+      level: 1,
+      actionCount: 3,
+      isRegistered: true,
+      isVerified: true,
+      profileHash: stringToBytes32("SandboxCitizen"),
+      registeredAt: Math.floor(Date.now() / 1000) - 86400,
+      updatedAt: Math.floor(Date.now() / 1000),
+      isGlobalModerator: false,
+      hasVerifierRole: true,
+      hasAdminRole: false,
+    });
+    
+    setUserStats(local);
+    setTxError(null);
+    setTxSuccessMessage(null);
+  };
+
   const disconnectWallet = () => {
     setSigner(null);
     setAccount(null);
@@ -174,9 +255,13 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setBadges([]);
     setTxError(null);
     setTxSuccessMessage(null);
+    setTxState("idle");
+    setIsSandboxMode(false);
+    localStorage.setItem("web3_sandbox_active", "false");
   };
 
   const switchNetwork = async (): Promise<boolean> => {
+    if (isSandboxMode) return true;
     const ethereum = (window as any).ethereum;
     if (!ethereum) return false;
     try {
@@ -188,7 +273,6 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setIsCorrectNetwork(true);
       return true;
     } catch (switchError: any) {
-      // This error code indicates that the chain has not been added to MetaMask.
       if (switchError.code === 4902) {
         try {
           await ethereum.request({
@@ -214,7 +298,6 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
-  // Convert a plain string into bytes32 hex representation
   const stringToBytes32 = (str: string): string => {
     const utf8Bytes = ethers.toUtf8Bytes(str);
     if (utf8Bytes.length > 32) {
@@ -225,7 +308,6 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     return ethers.hexlify(bytes32);
   };
 
-  // Parse bytes32 hex back to clean string
   const bytes32ToString = (hex: string): string => {
     try {
       const cleanHex = hex.replace(/^0x/, "").replace(/(00)*$/, "");
@@ -236,12 +318,127 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
   };
 
+  const addXPAndReputation = (xpDelta: number, repDelta: number) => {
+    if (!account) return;
+    const currentLocal = getStorageItem<UserStats>(`user_stats_${account.toLowerCase()}`, {
+      xp: 0,
+      reputation: 0,
+      level: 1,
+      actionCount: 0,
+      isRegistered: false,
+      isVerified: false,
+      profileHash: "0x" + "0".repeat(64),
+      registeredAt: 0,
+      updatedAt: 0,
+      isGlobalModerator: false,
+      hasVerifierRole: false,
+      hasAdminRole: false,
+    });
+
+    const newXp = (userStats?.xp || currentLocal.xp || 0) + xpDelta;
+    const newRep = (userStats?.reputation || currentLocal.reputation || 0) + repDelta;
+    const newLevel = Math.max(1, Math.floor(Math.sqrt(newXp / 100)));
+    const newActionCount = (userStats?.actionCount || currentLocal.actionCount || 0) + 1;
+
+    const updated = {
+      ...(userStats || currentLocal),
+      xp: newXp,
+      reputation: newRep,
+      level: newLevel,
+      actionCount: newActionCount
+    };
+
+    setStorageItem(`user_stats_${account.toLowerCase()}`, updated);
+    setUserStats(updated);
+  };
+
+  const clearTxState = () => {
+    setTxState("idle");
+    setIsTxPending(false);
+    setTxError(null);
+    setTxSuccessMessage(null);
+    setCurrentTxHash(null);
+  };
+
   const refreshStats = async (targetAddress?: string) => {
     const addressToQuery = targetAddress || account;
     if (!addressToQuery) return;
 
+    if (isSandboxMode) {
+      const local = getStorageItem<UserStats>(`user_stats_${addressToQuery.toLowerCase()}`, {
+        xp: 150,
+        reputation: 15,
+        level: 1,
+        actionCount: 3,
+        isRegistered: true,
+        isVerified: true,
+        profileHash: stringToBytes32("SandboxCitizen"),
+        registeredAt: Math.floor(Date.now() / 1000) - 86400,
+        updatedAt: Math.floor(Date.now() / 1000),
+        isGlobalModerator: false,
+        hasVerifierRole: true,
+        hasAdminRole: false,
+      });
+      setUserStats(local);
+
+      // Set sandbox badges
+      const baseBadges: BadgeType[] = [
+        {
+          id: VERIFICATION_BADGE_ID,
+          name: "Identity Verification",
+          description: "Granted to on-chain verified forum citizens by a verifier.",
+          image: "https://api.dicebear.com/7.x/identicon/svg?seed=verified",
+          uri: "",
+          isOwned: local.isVerified,
+          kind: "Badge",
+          active: true
+        },
+        {
+          id: 2,
+          name: "Elite Contributor",
+          description: "Granted to high-reputation members (>500 Rep) for high-quality contributions.",
+          image: "https://api.dicebear.com/7.x/identicon/svg?seed=elite",
+          uri: "",
+          isOwned: local.reputation > 500,
+          kind: "Badge",
+          active: true
+        },
+        {
+          id: 3,
+          name: "Senior Moderator",
+          description: "Integrated on-chain moderator access to maintain social forum stability.",
+          image: "https://api.dicebear.com/7.x/identicon/svg?seed=mod",
+          uri: "",
+          isOwned: local.isGlobalModerator,
+          kind: "Badge",
+          active: true
+        },
+        {
+          id: 4,
+          name: "First Post Milestone",
+          description: "Achievement unlocked by publishing your very first discussion topic.",
+          image: "https://api.dicebear.com/7.x/identicon/svg?seed=first",
+          uri: "",
+          isOwned: local.actionCount >= 1,
+          kind: "Achievement",
+          active: true
+        },
+        {
+          id: 5,
+          name: "Reputation Pioneer",
+          description: "Reached Level 5+ on-chain through consistent quality contributions.",
+          image: "https://api.dicebear.com/7.x/identicon/svg?seed=pioneer",
+          uri: "",
+          isOwned: local.level >= 5,
+          kind: "Achievement",
+          active: true
+        }
+      ];
+      setBadges(baseBadges);
+      return;
+    }
+
     try {
-      // Connect contract instances using read-only provider (no wallet required to view)
       const identityRegistry = new ethers.Contract(
         CONTRACT_ADDRESSES.ForumIdentityRegistry,
         FORUM_IDENTITY_REGISTRY_ABI,
@@ -278,7 +475,7 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
         console.warn("Identity check failed:", err);
       }
 
-      // 2. Fetch Account stats (XP, Reputation, Level, actions)
+      // 2. Fetch Account stats
       let xp = 0;
       let reputation = 0;
       let level = 1;
@@ -294,17 +491,26 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
         console.warn("Reputation stats query failed:", err);
       }
 
-      // 3. Fetch user roles for administrative panel access
+      // Sync and load local backup if contract returns empty or fails
+      const localBackup = getStorageItem<any>(`user_stats_${addressToQuery.toLowerCase()}`, null);
+      if (localBackup) {
+        xp = Math.max(xp, localBackup.xp || 0);
+        reputation = Math.max(reputation, localBackup.reputation || 0);
+        level = Math.max(level, localBackup.level || 1);
+        actionCount = Math.max(actionCount, localBackup.actionCount || 0);
+        if (localBackup.isRegistered) isRegistered = true;
+        if (localBackup.isVerified) isVerified = true;
+      }
+
+      // 3. Fetch user roles
       let isGlobalModerator = false;
       let hasVerifierRole = false;
       let hasAdminRole = false;
 
       try {
         isGlobalModerator = await identityRegistry.isGlobalModerator(addressToQuery);
-        
         const VERIFIER_ROLE = await identityRegistry.VERIFIER_ROLE();
         hasVerifierRole = await identityRegistry.hasRole(VERIFIER_ROLE, addressToQuery);
-
         const ADMIN_ROLE = await identityRegistry.DEFAULT_ADMIN_ROLE();
         hasAdminRole = await identityRegistry.hasRole(ADMIN_ROLE, addressToQuery);
       } catch (err) {
@@ -386,7 +592,7 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
             const bal = await soulboundTokensContract.balanceOf(addressToQuery, badge.id);
             return {
               ...badge,
-              isOwned: Number(bal) > 0,
+              isOwned: Number(bal) > 0 || (badge.id === 1 && isVerified),
             };
           } catch {
             return badge;
@@ -408,38 +614,118 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     args: any[],
     successMsg: string
   ): Promise<string | null> => {
+    setIsTxPending(true);
+    setTxError(null);
+    setTxSuccessMessage(null);
+
+    if (isSandboxMode) {
+      setTxState("waiting_confirmation");
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      
+      setTxState("pending");
+      const fakeHash = "0x" + Array.from({length: 64}, () => Math.floor(Math.random()*16).toString(16)).join("");
+      setCurrentTxHash(fakeHash);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      setTxState("confirmed");
+      setTxSuccessMessage(`${successMsg} (Simulated Gas used: 64120)`);
+      
+      // Update local stats based on simulated transaction methods
+      if (account) {
+        const local = getStorageItem<UserStats>(`user_stats_${account.toLowerCase()}`, {
+          xp: 150,
+          reputation: 15,
+          level: 1,
+          actionCount: 3,
+          isRegistered: true,
+          isVerified: true,
+          profileHash: stringToBytes32("SandboxCitizen"),
+          registeredAt: Math.floor(Date.now() / 1000) - 86400,
+          updatedAt: Math.floor(Date.now() / 1000),
+          isGlobalModerator: false,
+          hasVerifierRole: true,
+          hasAdminRole: false,
+        });
+
+        if (methodName === "register") {
+          local.isRegistered = true;
+          local.profileHash = args[0];
+          local.registeredAt = Math.floor(Date.now() / 1000);
+          local.updatedAt = Math.floor(Date.now() / 1000);
+        } else if (methodName === "updateProfileHash") {
+          local.profileHash = args[0];
+          local.updatedAt = Math.floor(Date.now() / 1000);
+        } else if (methodName === "setVerification") {
+          local.isVerified = args[1];
+        } else if (methodName === "recordContribution") {
+          local.xp += Number(args[1]);
+          local.reputation += Number(args[2]);
+          local.level = Math.max(1, Math.floor(Math.sqrt(local.xp / 100)));
+          local.actionCount += 1;
+        }
+
+        setStorageItem(`user_stats_${account.toLowerCase()}`, local);
+        setUserStats(local);
+      }
+
+      await refreshStats();
+      setIsTxPending(false);
+      return fakeHash;
+    }
+
     if (!signer) {
       setTxError("Connect your wallet first.");
+      setTxState("failed");
+      setIsTxPending(false);
       return null;
     }
     if (!isCorrectNetwork) {
       const switched = await switchNetwork();
       if (!switched) {
         setTxError("Please switch to the Base network.");
+        setTxState("failed");
+        setIsTxPending(false);
         return null;
       }
     }
 
-    setIsTxPending(true);
-    setTxError(null);
-    setTxSuccessMessage(null);
-
+    setTxState("waiting_confirmation");
     try {
       const contract = new ethers.Contract(contractAddress, abi, signer);
       const tx = await contract[methodName](...args);
+      
+      setTxState("pending");
       setCurrentTxHash(tx.hash);
       
       // Wait for 1 confirmation
       const receipt = await tx.wait(1);
       
+      setTxState("confirmed");
       setTxSuccessMessage(`${successMsg} (Gas used: ${receipt.gasUsed.toString()})`);
       setCurrentTxHash(receipt.hash);
       
-      // Refresh statistics
+      // Sync local stats to avoid gaps
+      if (account) {
+        const local = getStorageItem<any>(`user_stats_${account.toLowerCase()}`, {});
+        if (methodName === "register") {
+          local.isRegistered = true;
+          local.profileHash = args[0];
+        } else if (methodName === "updateProfileHash") {
+          local.profileHash = args[0];
+        } else if (methodName === "recordContribution") {
+          local.xp = (local.xp || 0) + Number(args[1]);
+          local.reputation = (local.reputation || 0) + Number(args[2]);
+          local.level = Math.max(1, Math.floor(Math.sqrt(local.xp / 100)));
+          local.actionCount = (local.actionCount || 0) + 1;
+        }
+        setStorageItem(`user_stats_${account.toLowerCase()}`, local);
+      }
+
       await refreshStats();
       return receipt.hash;
     } catch (error: any) {
       console.error(`Transaction ${methodName} failed:`, error);
+      setTxState("failed");
       setTxError(error.reason || error.message || "Transaction failed.");
       return null;
     } finally {
@@ -542,10 +828,15 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
         currentTxHash,
         txError,
         txSuccessMessage,
+        isSandboxMode,
+        txState,
         connectWallet,
+        connectSandboxWallet,
         disconnectWallet,
         switchNetwork,
         refreshStats,
+        addXPAndReputation,
+        clearTxState,
         registerIdentityOnChain,
         updateProfileHashOnChain,
         setVerificationOnChain,
@@ -556,6 +847,81 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }}
     >
       {children}
+      
+      {/* Floating Transaction Status Toast */}
+      {txState !== "idle" && (
+        <div className="fixed bottom-6 right-6 z-50 w-80 bg-slate-950/95 border border-slate-800 rounded-2xl shadow-2xl p-4 md:p-5 animate-slide-up backdrop-blur-md">
+          <div className="flex items-start gap-3">
+            {txState === "waiting_confirmation" && (
+              <div className="w-8 h-8 rounded-full bg-indigo-500/10 flex items-center justify-center shrink-0">
+                <div className="w-4.5 h-4.5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+              </div>
+            )}
+            {txState === "pending" && (
+              <div className="w-8 h-8 rounded-full bg-amber-500/10 flex items-center justify-center shrink-0">
+                <div className="w-4.5 h-4.5 border-2 border-amber-500 border-t-transparent rounded-full animate-spin"></div>
+              </div>
+            )}
+            {txState === "confirmed" && (
+              <div className="w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center text-emerald-400 shrink-0">
+                <Check className="w-5 h-5" />
+              </div>
+            )}
+            {txState === "failed" && (
+              <div className="w-8 h-8 rounded-full bg-rose-500/10 flex items-center justify-center text-rose-500 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+            )}
+
+            <div className="flex-1 min-w-0">
+              <h4 className="text-xs font-bold text-slate-200 flex items-center gap-1">
+                {txState === "waiting_confirmation" && "Confirm Transaction"}
+                {txState === "pending" && "Transaction Pending"}
+                {txState === "confirmed" && "Transaction Confirmed!"}
+                {txState === "failed" && "Transaction Failed"}
+                {isSandboxMode && (
+                  <span className="flex items-center gap-0.5 text-[9px] bg-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded-full font-mono uppercase">
+                    <Sparkles className="w-2.5 h-2.5" /> Sandbox
+                  </span>
+                )}
+              </h4>
+              <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                {txState === "waiting_confirmation" && "Please open your wallet and approve the transaction signature request."}
+                {txState === "pending" && "Transaction has been broadcast to the Base network. Waiting for confirmation on-chain..."}
+                {txState === "confirmed" && (txSuccessMessage || "Successfully submitted to Base.")}
+                {txState === "failed" && (txError || "An error occurred while executing the contract transaction.")}
+              </p>
+
+              {currentTxHash && (
+                <div className="mt-3 flex items-center justify-between bg-slate-900/60 border border-slate-800/80 px-2.5 py-1.5 rounded-lg text-[10px] font-mono">
+                  <span className="text-slate-500 truncate mr-2">Tx: {currentTxHash}</span>
+                  {!isSandboxMode ? (
+                    <a
+                      href={`${CHAIN_CONFIG.blockExplorer}/tx/${currentTxHash}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-400 hover:text-indigo-300 font-semibold shrink-0"
+                    >
+                      Basescan ↗
+                    </a>
+                  ) : (
+                    <span className="text-slate-500 font-semibold italic shrink-0">Simulated</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-4 flex justify-end">
+            <button
+              onClick={clearTxState}
+              className="text-[10px] font-bold uppercase tracking-wider text-slate-400 hover:text-white bg-[#0c0c0e] border border-slate-800 hover:border-slate-700 px-3 py-1.5 rounded-lg transition-colors cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
     </Web3Context.Provider>
   );
 };
