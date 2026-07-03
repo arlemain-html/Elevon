@@ -14,7 +14,9 @@ import {
   AlertCircle,
   Inbox,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Pencil,
+  Trash2
 } from "lucide-react";
 
 interface FeedViewProps {
@@ -23,7 +25,7 @@ interface FeedViewProps {
 }
 
 export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuery }) => {
-  const { account, userStats, recordContributionOnChain } = useWeb3();
+  const { account, userStats, recordContributionOnChain, addXPAndReputation } = useWeb3();
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +36,11 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
   const [comments, setComments] = useState<Comment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState<boolean>(false);
   const [newCommentText, setNewCommentText] = useState<string>("");
+
+  // Edit & Delete States
+  const [isEditing, setIsEditing] = useState<boolean>(false);
+  const [editTitle, setEditTitle] = useState<string>("");
+  const [editContent, setEditContent] = useState<string>("");
 
   useEffect(() => {
     loadPosts();
@@ -75,6 +82,8 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
 
         // On-chain integration: award 10 XP and 2 reputation points for active voting upvotes on Base!
         if (account && voteType === "up") {
+          // Increment locally instantly
+          addXPAndReputation(10, 2);
           try {
             await recordContributionOnChain(account, 10, 2, "Vote Upvote Action");
           } catch (onChainErr) {
@@ -93,6 +102,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
     if (!post) return;
 
     setActivePost(post);
+    setIsEditing(false);
     setCommentsLoading(true);
     try {
       const postComments = await ForumBackendService.getComments(postId);
@@ -124,6 +134,9 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
       setActivePost(updatedPost);
       setPosts(posts.map(p => p.id === activePost.id ? updatedPost : p));
 
+      // Award XP and reputation locally instantly
+      addXPAndReputation(15, 3);
+
       // Trigger standard on-chain XP reward: 15 XP, 3 Reputation points for participating in debate!
       try {
         await recordContributionOnChain(account, 15, 3, "New Comment");
@@ -132,6 +145,49 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
       }
     } catch (err) {
       console.error("Failed to add comment:", err);
+    }
+  };
+
+  const handleStartEdit = (post: Post) => {
+    setEditTitle(post.title);
+    setEditContent(post.content);
+    setIsEditing(true);
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!account || !activePost) return;
+
+    try {
+      const updated = await ForumBackendService.updatePost(activePost.id, editTitle.trim(), editContent.trim(), account);
+      if (updated) {
+        setActivePost({ ...activePost, ...updated });
+        setPosts(posts.map(p => p.id === activePost.id ? { ...p, ...updated } : p));
+        setIsEditing(false);
+        addXPAndReputation(10, 1);
+        try {
+          await recordContributionOnChain(account, 10, 1, "Edit Existing Post");
+        } catch {}
+      }
+    } catch (err) {
+      console.error("Failed to edit post:", err);
+    }
+  };
+
+  const handleDeletePost = async (postId: string) => {
+    if (!account) return;
+    if (!window.confirm("Are you sure you want to delete this post? This action cannot be undone.")) return;
+
+    try {
+      const success = await ForumBackendService.deletePost(postId, account);
+      if (success) {
+        setPosts(posts.filter(p => p.id !== postId));
+        if (activePost && activePost.id === postId) {
+          setActivePost(null);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to delete post:", err);
     }
   };
 
@@ -173,46 +229,109 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
 
         {/* Detailed Post Card */}
         <div className="bg-slate-900/40 border border-slate-800 rounded-3xl p-6 md:p-8 space-y-6">
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className={`px-2.5 py-0.5 rounded-lg border font-semibold ${catDetails.class}`}>
-              {catDetails.name}
-            </span>
-            <span className="text-slate-600">•</span>
-            <img 
-              src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${activePost.id}`} 
-              alt="avatar" 
-              className="w-5 h-5 rounded bg-slate-900"
-            />
-            <span className="font-bold text-slate-200">
-              {activePost.authorUsername || formatAddress(activePost.authorAddress)}
-            </span>
-            <span className="text-slate-600">•</span>
-            <span className="text-slate-500 font-medium">
-              {new Date(activePost.createdAt).toLocaleDateString("en-US", {
-                day: "numeric",
-                month: "long",
-                year: "numeric"
-              })}
-            </span>
+          <div className="flex justify-between items-start gap-4">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className={`px-2.5 py-0.5 rounded-lg border font-semibold ${catDetails.class}`}>
+                {catDetails.name}
+              </span>
+              <span className="text-slate-600">•</span>
+              <img 
+                src={`https://api.dicebear.com/7.x/pixel-art/svg?seed=${activePost.id}`} 
+                alt="avatar" 
+                className="w-5 h-5 rounded bg-slate-900"
+              />
+              <span className="font-bold text-slate-200">
+                {activePost.authorUsername || formatAddress(activePost.authorAddress)}
+              </span>
+              <span className="text-slate-600">•</span>
+              <span className="text-slate-500 font-medium">
+                {new Date(activePost.createdAt).toLocaleDateString("en-US", {
+                  day: "numeric",
+                  month: "long",
+                  year: "numeric"
+                })}
+              </span>
+            </div>
+
+            {account && account.toLowerCase() === activePost.authorAddress.toLowerCase() && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => handleStartEdit(activePost)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  title="Edit Post"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => handleDeletePost(activePost.id)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                  title="Delete Post"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
 
-          <h2 className="text-2xl font-extrabold text-white tracking-tight leading-snug font-display">
-            {activePost.title}
-          </h2>
+          {isEditing ? (
+            <form onSubmit={handleSaveEdit} className="space-y-4 pt-2">
+              <div className="space-y-1.5">
+                <label className="text-[10px] text-slate-400 font-bold uppercase font-display">Edit Title</label>
+                <input
+                  type="text"
+                  required
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="w-full bg-[#0c0c0e] border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-650 focus:outline-none focus:border-indigo-500/80 transition-colors"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-[10px] text-slate-400 font-bold uppercase font-display">Edit Content</label>
+                <textarea
+                  required
+                  rows={6}
+                  value={editContent}
+                  onChange={(e) => setEditContent(e.target.value)}
+                  className="w-full bg-[#0c0c0e] border border-slate-800 rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-650 focus:outline-none focus:border-indigo-500/80 transition-colors resize-none"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsEditing(false)}
+                  className="text-xs font-semibold text-slate-400 hover:text-white bg-[#0c0c0e] border border-slate-800 px-4 py-2 rounded-xl transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-xl transition-all cursor-pointer"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </form>
+          ) : (
+            <>
+              <h2 className="text-2xl font-extrabold text-white tracking-tight leading-snug font-display">
+                {activePost.title}
+              </h2>
 
-          <p className="text-slate-300 text-base leading-relaxed break-words whitespace-pre-wrap">
-            {activePost.content}
-          </p>
+              <p className="text-slate-300 text-base leading-relaxed break-words whitespace-pre-wrap">
+                {activePost.content}
+              </p>
 
-          {activePost.imageUrl && (
-            <div className="rounded-2xl overflow-hidden border border-slate-800 max-h-[500px] flex items-center justify-center bg-[#09090b]/60">
-              <img 
-                src={activePost.imageUrl} 
-                alt={activePost.title} 
-                className="object-contain w-full h-full max-h-[500px]"
-                referrerPolicy="no-referrer"
-              />
-            </div>
+              {activePost.imageUrl && (
+                <div className="rounded-2xl overflow-hidden border border-slate-800 max-h-[500px] flex items-center justify-center bg-[#09090b]/60">
+                  <img 
+                    src={activePost.imageUrl} 
+                    alt={activePost.title} 
+                    className="object-contain w-full h-full max-h-[500px]"
+                    referrerPolicy="no-referrer"
+                  />
+                </div>
+              )}
+            </>
           )}
 
           {/* Upvote & Social detail footer */}
@@ -399,6 +518,7 @@ export const FeedView: React.FC<FeedViewProps> = ({ selectedCategory, searchQuer
               post={post}
               onPostClick={handlePostClick}
               onVote={handleVote}
+              onDelete={handleDeletePost}
             />
           ))}
         </div>
