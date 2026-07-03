@@ -1,0 +1,6 @@
+{
+  "name": "Web3 Social Forum",
+  "description": "A high-performance Web3 social forum dApp featuring on-chain identity registry, Soulbound reputation tokens, XP leveling, and verifiable user credentials on Base.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
