@@ -9,6 +9,29 @@ import {
 import { UserStats, BadgeType } from "../types/forum";
 import { ForumBackendService } from "../services/supabase";
 import { Check, AlertCircle, Sparkles } from "lucide-react";
+import { createWeb3Modal, useWeb3Modal } from "@web3modal/wagmi/react";
+import { useAccount, useDisconnect, useWalletClient, useSwitchChain } from "wagmi";
+import { wagmiConfig, projectId } from "../blockchain/wagmiConfig";
+import { type WalletClient } from "viem";
+
+// Initialize Web3Modal once
+createWeb3Modal({
+  wagmiConfig,
+  projectId,
+  enableAnalytics: false,
+});
+
+function walletClientToSigner(walletClient: WalletClient) {
+  const { account, chain, transport } = walletClient;
+  const network = {
+    chainId: chain.id,
+    name: chain.name,
+    ensAddress: chain.contracts?.ensRegistry?.address,
+  };
+  const provider = new ethers.BrowserProvider(transport as any, network);
+  const signer = new ethers.JsonRpcSigner(provider, account.address);
+  return signer;
+}
 
 // Local storage helpers
 const getStorageItem = <T,>(key: string, fallback: T): T => {
@@ -67,6 +90,12 @@ interface Web3ContextType {
 const Web3Context = createContext<Web3ContextType | undefined>(undefined);
 
 export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const { address: wagmiAddress, chainId: wagmiChainId, isConnected } = useAccount();
+  const { disconnect: wagmiDisconnect } = useDisconnect();
+  const { data: walletClient } = useWalletClient();
+  const { switchChainAsync } = useSwitchChain();
+  const { open: openModal } = useWeb3Modal();
+
   const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null);
   const [signer, setSigner] = useState<ethers.JsonRpcSigner | null>(null);
   const [account, setAccount] = useState<string | null>(null);
@@ -77,9 +106,7 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
   const [currentTxHash, setCurrentTxHash] = useState<string | null>(null);
   const [txError, setTxError] = useState<string | null>(null);
   const [txSuccessMessage, setTxSuccessMessage] = useState<string | null>(null);
-  const [isSandboxMode, setIsSandboxMode] = useState<boolean>(() => {
-    return localStorage.getItem("web3_sandbox_active") === "true";
-  });
+  const isSandboxMode = false;
   const [txState, setTxState] = useState<TxState>("idle");
   
   const [userStats, setUserStats] = useState<UserStats | null>(null);
@@ -88,85 +115,38 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
   // 1. Read-only provider connected to Base RPC directly
   const readOnlyProvider = new ethers.JsonRpcProvider(CHAIN_CONFIG.rpcUrl);
 
-  const getSandboxAddress = (): string => {
-    let addr = localStorage.getItem("sandbox_wallet_address");
-    if (!addr) {
-      const chars = "0123456789abcdef";
-      let hex = "0x";
-      for (let i = 0; i < 40; i++) {
-        hex += chars[Math.floor(Math.random() * 16)];
-      }
-      addr = hex;
-      localStorage.setItem("sandbox_wallet_address", addr);
-    }
-    return addr;
-  };
-
-  // Initialize and check for existing connection
+  // Sync the wagmi account state to our local state
   useEffect(() => {
-    const activeSandbox = localStorage.getItem("web3_sandbox_active") === "true";
-    if (activeSandbox) {
-      connectSandboxWallet();
-      return;
+    if (isConnected && wagmiAddress) {
+      setAccount(wagmiAddress);
+      setChainId(wagmiChainId || null);
+      setIsCorrectNetwork(wagmiChainId === CHAIN_CONFIG.chainId);
+    } else {
+      setAccount(null);
+      setChainId(null);
+      setIsCorrectNetwork(false);
+      setSigner(null);
+      setProvider(null);
     }
+  }, [isConnected, wagmiAddress, wagmiChainId]);
 
-    const ethereum = (window as any).ethereum;
-    const checkConnection = async () => {
-      if (ethereum) {
-        try {
-          const browserProvider = new ethers.BrowserProvider(ethereum);
-          setProvider(browserProvider);
-
-          const accounts = await ethereum.request({ method: "eth_accounts" });
-          if (accounts.length > 0) {
-            const network = await browserProvider.getNetwork();
-            const currentChainId = Number(network.chainId);
-            setChainId(currentChainId);
-            setAccount(accounts[0]);
-            
-            const isCorrect = currentChainId === CHAIN_CONFIG.chainId;
-            setIsCorrectNetwork(isCorrect);
-
-            if (isCorrect) {
-              const currentSigner = await browserProvider.getSigner();
-              setSigner(currentSigner);
-            }
-          }
-        } catch (error) {
-          console.error("Error checking wallet connection:", error);
+  // Sync the walletClient to the Ethers signer and provider
+  useEffect(() => {
+    if (walletClient) {
+      try {
+        const ethersSigner = walletClientToSigner(walletClient);
+        setSigner(ethersSigner);
+        if (ethersSigner.provider) {
+          setProvider(ethersSigner.provider as ethers.BrowserProvider);
         }
+      } catch (err) {
+        console.error("Error mapping walletClient to Ethers Signer:", err);
       }
-    };
-
-    checkConnection();
-
-    // Setup Ethereum event listeners
-    if (ethereum) {
-      const handleAccountsChanged = (accounts: string[]) => {
-        if (accounts.length > 0) {
-          setAccount(accounts[0]);
-          refreshStats(accounts[0]);
-        } else {
-          disconnectWallet();
-        }
-      };
-
-      const handleChainChanged = (hexChainId: string) => {
-        const newChainId = parseInt(hexChainId, 16);
-        setChainId(newChainId);
-        setIsCorrectNetwork(newChainId === CHAIN_CONFIG.chainId);
-        window.location.reload();
-      };
-
-      ethereum.on("accountsChanged", handleAccountsChanged);
-      ethereum.on("chainChanged", handleChainChanged);
-
-      return () => {
-        ethereum.removeListener("accountsChanged", handleAccountsChanged);
-        ethereum.removeListener("chainChanged", handleChainChanged);
-      };
+    } else {
+      setSigner(null);
+      setProvider(null);
     }
-  }, []);
+  }, [walletClient]);
 
   // Sync / refresh user stats and badges
   useEffect(() => {
@@ -176,79 +156,28 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
       // Load default global demo stats in read-only mode for deployer if wallet disconnected
       refreshStats(CONTRACT_ADDRESSES.ForumIdentityRegistry);
     }
-  }, [account, isCorrectNetwork, isSandboxMode]);
+  }, [account, isCorrectNetwork]);
 
   const connectWallet = async () => {
-    const ethereum = (window as any).ethereum;
-    if (!ethereum) {
-      setTxError("Browser wallet not detected. Connecting Sandbox Mode as a high-fidelity fallback!");
-      connectSandboxWallet();
-      return;
-    }
-
-    setIsConnecting(true);
     setTxError(null);
-    setIsSandboxMode(false);
-    localStorage.setItem("web3_sandbox_active", "false");
+    setTxSuccessMessage(null);
+    setIsConnecting(true);
     try {
-      const browserProvider = new ethers.BrowserProvider(ethereum);
-      setProvider(browserProvider);
-
-      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
-      const network = await browserProvider.getNetwork();
-      const currentChainId = Number(network.chainId);
-      
-      setChainId(currentChainId);
-      setAccount(accounts[0]);
-      
-      const isCorrect = currentChainId === CHAIN_CONFIG.chainId;
-      setIsCorrectNetwork(isCorrect);
-
-      if (isCorrect) {
-        const currentSigner = await browserProvider.getSigner();
-        setSigner(currentSigner);
-      } else {
-        await switchNetwork();
-      }
-    } catch (error: any) {
-      console.error("Wallet connection error:", error);
-      setTxError(error.message || "Failed to connect wallet.");
+      await openModal();
+    } catch (err: any) {
+      console.error("Error opening Web3Modal:", err);
+      setTxError("Failed to open connection modal.");
     } finally {
       setIsConnecting(false);
     }
   };
 
   const connectSandboxWallet = () => {
-    setIsSandboxMode(true);
-    localStorage.setItem("web3_sandbox_active", "true");
-    
-    const sandboxAddr = getSandboxAddress();
-    setAccount(sandboxAddr);
-    setIsCorrectNetwork(true);
-    setChainId(CHAIN_CONFIG.chainId);
-    
-    // Load local stats immediately
-    const local = getStorageItem<UserStats>(`user_stats_${sandboxAddr.toLowerCase()}`, {
-      xp: 150,
-      reputation: 15,
-      level: 1,
-      actionCount: 3,
-      isRegistered: true,
-      isVerified: true,
-      profileHash: stringToBytes32("SandboxCitizen"),
-      registeredAt: Math.floor(Date.now() / 1000) - 86400,
-      updatedAt: Math.floor(Date.now() / 1000),
-      isGlobalModerator: false,
-      hasVerifierRole: true,
-      hasAdminRole: false,
-    });
-    
-    setUserStats(local);
-    setTxError(null);
-    setTxSuccessMessage(null);
+    console.warn("Sandbox Mode is disabled in production.");
   };
 
   const disconnectWallet = () => {
+    wagmiDisconnect();
     setSigner(null);
     setAccount(null);
     setUserStats(null);
@@ -256,44 +185,16 @@ export const Web3Provider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setTxError(null);
     setTxSuccessMessage(null);
     setTxState("idle");
-    setIsSandboxMode(false);
-    localStorage.setItem("web3_sandbox_active", "false");
   };
 
   const switchNetwork = async (): Promise<boolean> => {
-    if (isSandboxMode) return true;
-    const ethereum = (window as any).ethereum;
-    if (!ethereum) return false;
     try {
-      const targetHex = "0x" + CHAIN_CONFIG.chainId.toString(16);
-      await ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: targetHex }],
-      });
+      await switchChainAsync({ chainId: CHAIN_CONFIG.chainId });
       setIsCorrectNetwork(true);
       return true;
-    } catch (switchError: any) {
-      if (switchError.code === 4902) {
-        try {
-          await ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: "0x" + CHAIN_CONFIG.chainId.toString(16),
-                chainName: CHAIN_CONFIG.networkName,
-                rpcUrls: [CHAIN_CONFIG.rpcUrl],
-                nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-                blockExplorerUrls: [CHAIN_CONFIG.blockExplorer],
-              },
-            ],
-          });
-          setIsCorrectNetwork(true);
-          return true;
-        } catch (addError) {
-          console.error("Failed to add Base network", addError);
-        }
-      }
-      console.error("Failed to switch network", switchError);
+    } catch (err: any) {
+      console.error("Failed to switch network via Wagmi:", err);
+      setTxError("Failed to switch network. Please switch to Base manually.");
       return false;
     }
   };
