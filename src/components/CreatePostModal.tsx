@@ -12,7 +12,7 @@ interface CreatePostModalProps {
 }
 
 export const CreatePostModal: React.FC<CreatePostModalProps> = ({ isOpen, onClose, onPostCreated }) => {
-  const { account, userStats, recordContributionOnChain } = useWeb3();
+  const { account, userStats, recordContributionOnChain, addXPAndReputation } = useWeb3();
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [category, setCategory] = useState("cat_general");
@@ -37,6 +37,9 @@ export const CreatePostModal: React.FC<CreatePostModalProps> = ({ isOpen, onClos
         imageUrl.trim() || undefined
       );
 
+      // Add XP and Reputation locally instantly
+      addXPAndReputation(50, 5);
+
       // On-chain integration: reward 50 XP, 5 Reputation on Base for publishing a smart topic!
       try {
         await recordContributionOnChain(account, 50, 5, "Publish New Post");
@@ -47,7 +50,7 @@ export const CreatePostModal: React.FC<CreatePostModalProps> = ({ isOpen, onClos
       onPostCreated(post);
       onClose();
     } catch (err) {
-      console.error("Gagal memposting:", err);
+      console.error("Failed to post:", err);
     } finally {
       setSubmitting(false);
     }
@@ -66,7 +69,7 @@ export const CreatePostModal: React.FC<CreatePostModalProps> = ({ isOpen, onClos
       {/* Backdrop */}
       <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
         {/* Modal Container */}
-        <div className="bg-[#09090b]/90 border border-slate-800 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl p-6 md:p-8 space-y-6 animate-scale-up">
+        <div className="bg-[#09090b]/90 border border-slate-800 rounded-3xl w-full max-w-2xl overflow-y-auto max-h-[90vh] shadow-2xl p-6 md:p-8 space-y-6 animate-scale-up">
           
           {/* Header */}
           <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
